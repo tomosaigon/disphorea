@@ -3,7 +3,15 @@ import { NextRequest } from "next/server"
 import Feedback from "../../../../contract-artifacts/Feedback.json"
 
 const offchainFeedback: string[] = []
-const isOffchain = process.env.NEXT_PUBLIC_DEFAULT_NETWORK === "offchain"
+const zeroAddress = "0x0000000000000000000000000000000000000000"
+const isOffchain = (() => {
+    const semaphoreAddress = (process.env.NEXT_PUBLIC_SEMAPHORE_CONTRACT_ADDRESS ?? "").toLowerCase()
+    const feedbackAddress = (process.env.NEXT_PUBLIC_FEEDBACK_CONTRACT_ADDRESS ?? "").toLowerCase()
+    return (
+        (!semaphoreAddress || semaphoreAddress === zeroAddress) &&
+        (!feedbackAddress || feedbackAddress === zeroAddress)
+    )
+})()
 
 export async function GET() {
     return Response.json({ feedback: offchainFeedback })

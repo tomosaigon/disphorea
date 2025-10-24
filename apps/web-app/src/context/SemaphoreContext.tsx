@@ -24,7 +24,13 @@ const ethereumNetwork =
         ? "http://127.0.0.1:8545"
         : process.env.NEXT_PUBLIC_DEFAULT_NETWORK
 
-const isOffchain = process.env.NEXT_PUBLIC_DEFAULT_NETWORK === "offchain"
+const zeroAddress = "0x0000000000000000000000000000000000000000"
+const normalizeAddress = (address?: string) => (address ?? "").toLowerCase()
+const semaphoreAddress = normalizeAddress(process.env.NEXT_PUBLIC_SEMAPHORE_CONTRACT_ADDRESS)
+const feedbackAddress = normalizeAddress(process.env.NEXT_PUBLIC_FEEDBACK_CONTRACT_ADDRESS)
+const isOffchain =
+    (!semaphoreAddress || semaphoreAddress === zeroAddress) &&
+    (!feedbackAddress || feedbackAddress === zeroAddress)
 
 export const SemaphoreContextProvider: React.FC<ProviderProps> = ({ children }) => {
     const [_users, setUsers] = useState<any[]>([])
