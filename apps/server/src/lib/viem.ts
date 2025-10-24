@@ -29,5 +29,10 @@ export function getWalletClient() {
 }
 
 export const feedbackAbi = parseAbi([
-  'function sendFeedback((uint256 merkleTreeDepth,uint256 merkleTreeRoot,uint256 nullifier,uint256 message,uint256 scope,uint256[8] points) proof)'
+  'function sendFeedback(uint256 merkleTreeDepth,uint256 merkleTreeRoot,uint256 nullifier,uint256 feedback,uint256[8] points)',
+  'function addMemberAdmin(uint256 identityCommitment)'
+]);
+
+export const erc721Abi = parseAbi([
+  'function balanceOf(address owner) view returns (uint256)'
 ]);

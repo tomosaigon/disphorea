@@ -10,6 +10,7 @@
         "dev": "yarn workspaces foreach -A -pi run dev",
         "dev:web-app": "yarn workspace web-app dev",
         "dev:contracts": "yarn workspace contracts dev",
+        "artifacts:copy": "node scripts/copy-semaphore-artifacts.mjs",
         "dev:server": "yarn workspace server dev",
         "prettier": "prettier -c .",
         "prettier:write": "prettier -w ."
@@ -29,5 +30,8 @@
     "packageManager": "yarn@4.1.0",
     "devDependencies": {
         "prettier": "^2.5.1"
+    },
+    "dependencies": {
+        "@zk-kit/semaphore-artifacts": "^4.13.0"
     }
 }

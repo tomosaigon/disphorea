@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import db from '../db/client';
-import { publicClient, getWalletClient, feedbackAbi } from '../lib/viem';
+import { publicClient, getWalletClient, feedbackAbi, erc721Abi } from '../lib/viem';
 import { getContractsJson } from '../services/contracts';
 
 type DiscordNotifier = (message: string) => Promise<void>;
@@ -35,6 +35,61 @@ router.post('/discord/test', async (req, res) => {
   }
 });
 
+// --- NFT-gated join via relayer ---
+const JoinBody = z.object({
+  address: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+  identityCommitment: z.string().or(z.number()),
+  message: z.string().min(1),
+  signature: z.string().regex(/^0x[a-fA-F0-9]+$/)
+});
+
+router.post('/join', async (req, res) => {
+  const parsed = JoinBody.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+  const { address, identityCommitment, message, signature } = parsed.data;
+  const { feedback, nft } = getContractsJson();
+  if (!feedback || !nft) return res.status(500).json({ error: 'contracts not configured' });
+
+  try {
+    // Verify signature
+    const { verifyMessage } = await import('viem');
+    const ok = await verifyMessage({ address: address as `0x${string}`, message, signature: signature as `0x${string}` });
+    if (!ok) return res.status(401).json({ error: 'invalid signature' });
+
+    // Check NFT ownership on-chain
+    const bal = await publicClient.readContract({
+      address: nft as `0x${string}`,
+      abi: erc721Abi,
+      functionName: 'balanceOf',
+      args: [address as `0x${string}`]
+    });
+    if ((bal as bigint) <= 0n) return res.status(403).json({ error: 'address does not hold NFT' });
+
+    // Relay admin add
+    const walletClient = getWalletClient();
+    const hash = await walletClient.writeContract({
+      address: feedback as `0x${string}`,
+      abi: feedbackAbi,
+      functionName: 'addMemberAdmin',
+      args: [BigInt(identityCommitment as any)]
+    });
+    const rc = await publicClient.waitForTransactionReceipt({ hash });
+    res.json({ ok: true, txHash: rc.transactionHash });
+  } catch (e: any) {
+    console.error('[join] failed', e);
+    res.status(500).json({ error: e?.message || 'join failed' });
+  }
+});
+
+// Provide a canonical message for clients to sign for joining
+router.get('/join/challenge', (req, res) => {
+  const identityCommitment = (req.query.identityCommitment as string) || '';
+  const { groupId } = getContractsJson();
+  const message = `Disphorea: Join group ${groupId} with commitment ${identityCommitment}`;
+  res.json({ message });
+});
+
 router.get('/group/root', async (_req, res) => {
   res.json({ root: null });
 });
@@ -51,8 +106,7 @@ const PostBody = z.object({
   }),
   merkleRoot: z.union([z.string(), z.number()]),
   nullifierHash: z.union([z.string(), z.number()]),
-  scope: z.union([z.string(), z.number()]),
-  signal: z.union([z.string(), z.number()]),
+  feedback: z.union([z.string(), z.number()]),
   content: z.string().min(1),
   boardId: z.string().default('default')
 });
@@ -63,7 +117,7 @@ router.post('/posts', async (req, res) => {
     return res.status(400).json({ error: parsed.error.flatten() });
   }
 
-  const { proof, merkleRoot, nullifierHash, scope, signal, content, boardId } = parsed.data;
+  const { proof, merkleRoot, nullifierHash, feedback: feedbackValue, content, boardId } = parsed.data;
   const { feedback } = getContractsJson();
 
   if (!feedback) {
@@ -77,23 +131,20 @@ router.post('/posts', async (req, res) => {
       abi: feedbackAbi,
       functionName: 'sendFeedback',
       args: [
-        {
-          merkleTreeDepth: BigInt(proof.merkleTreeDepth as any),
-          merkleTreeRoot: BigInt(merkleRoot as any),
-          nullifier: BigInt(nullifierHash as any),
-          message: BigInt(signal as any),
-          scope: BigInt(scope as any),
-          points: proof.points.map((value) => BigInt(value as any)) as [
-            bigint,
-            bigint,
-            bigint,
-            bigint,
-            bigint,
-            bigint,
-            bigint,
-            bigint
-          ]
-        }
+        BigInt(proof.merkleTreeDepth as any),
+        BigInt(merkleRoot as any),
+        BigInt(nullifierHash as any),
+        BigInt(feedbackValue as any),
+        proof.points.map((value) => BigInt(value as any)) as [
+          bigint,
+          bigint,
+          bigint,
+          bigint,
+          bigint,
+          bigint,
+          bigint,
+          bigint
+        ]
       ]
     });
 
@@ -130,9 +181,9 @@ router.post('/posts', async (req, res) => {
       id: receipt.transactionHash,
       boardId,
       pseudoId: String(nullifierHash),
-      scope: String(scope),
+      scope: String(0),
       merkleRoot: String(merkleRoot),
-      signal: String(signal),
+      signal: String(feedbackValue),
       content,
       txHash: receipt.transactionHash,
       createdAt
