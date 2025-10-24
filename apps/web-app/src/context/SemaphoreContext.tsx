@@ -24,11 +24,33 @@ const ethereumNetwork =
         ? "http://127.0.0.1:8545"
         : process.env.NEXT_PUBLIC_DEFAULT_NETWORK
 
+const isOffchain = process.env.NEXT_PUBLIC_DEFAULT_NETWORK === "offchain"
+
 export const SemaphoreContextProvider: React.FC<ProviderProps> = ({ children }) => {
     const [_users, setUsers] = useState<any[]>([])
     const [_feedback, setFeedback] = useState<string[]>([])
 
     const refreshUsers = useCallback(async (): Promise<void> => {
+        if (isOffchain) {
+            try {
+                const response = await fetch("/api/join")
+
+                if (!response.ok) {
+                    setUsers([])
+                    return
+                }
+
+                const { members } = (await response.json()) as { members?: string[] }
+
+                setUsers(Array.isArray(members) ? members : [])
+            } catch (error) {
+                console.error(error)
+                setUsers([])
+            }
+
+            return
+        }
+
         const semaphore = new SemaphoreEthers(ethereumNetwork, {
             address: process.env.NEXT_PUBLIC_SEMAPHORE_CONTRACT_ADDRESS,
             projectId: process.env.NEXT_PUBLIC_INFURA_API_KEY
@@ -47,6 +69,26 @@ export const SemaphoreContextProvider: React.FC<ProviderProps> = ({ children }) 
     )
 
     const refreshFeedback = useCallback(async (): Promise<void> => {
+        if (isOffchain) {
+            try {
+                const response = await fetch("/api/feedback")
+
+                if (!response.ok) {
+                    setFeedback([])
+                    return
+                }
+
+                const { feedback } = (await response.json()) as { feedback?: string[] }
+
+                setFeedback(Array.isArray(feedback) ? feedback : [])
+            } catch (error) {
+                console.error(error)
+                setFeedback([])
+            }
+
+            return
+        }
+
         const semaphore = new SemaphoreEthers(ethereumNetwork, {
             address: process.env.NEXT_PUBLIC_SEMAPHORE_CONTRACT_ADDRESS,
             projectId: process.env.NEXT_PUBLIC_INFURA_API_KEY

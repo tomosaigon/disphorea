@@ -2,8 +2,27 @@ import { Contract, InfuraProvider, JsonRpcProvider, Wallet } from "ethers"
 import { NextRequest } from "next/server"
 import Feedback from "../../../../contract-artifacts/Feedback.json"
 
+const offchainMembers = new Set<string>()
+const isOffchain = process.env.NEXT_PUBLIC_DEFAULT_NETWORK === "offchain"
+
+export async function GET() {
+    return Response.json({ members: Array.from(offchainMembers) })
+}
+
 export async function POST(req: NextRequest) {
-    if (typeof process.env.ETHEREUM_PRIVATE_KEY !== "string") {
+    const { identityCommitment } = (await req.json()) as { identityCommitment?: string }
+
+    if (!identityCommitment) {
+        return new Response("Missing identity commitment", { status: 400 })
+    }
+
+    if (isOffchain) {
+        offchainMembers.add(identityCommitment)
+
+        return new Response("Off-chain membership recorded", { status: 200 })
+    }
+
+    if (typeof process.env.ETHEREUM_PRIVATE_KEY !== "string" || process.env.ETHEREUM_PRIVATE_KEY.length === 0) {
         throw new Error("Please, define ETHEREUM_PRIVATE_KEY in your .env file")
     }
 
@@ -19,8 +38,6 @@ export async function POST(req: NextRequest) {
 
     const signer = new Wallet(ethereumPrivateKey, provider)
     const contract = new Contract(contractAddress, Feedback.abi, signer)
-
-    const { identityCommitment } = await req.json()
 
     try {
         const transaction = await contract.joinGroup(identityCommitment)
