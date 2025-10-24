@@ -49,7 +49,13 @@ router.post('/join', async (req, res) => {
 
   const { address, identityCommitment, message, signature } = parsed.data;
   const { feedback, nft } = getContractsJson();
-  if (!feedback || !nft) return res.status(500).json({ error: 'contracts not configured' });
+  const zeroAddr = /^0x0{40}$/i;
+  if (!feedback || zeroAddr.test(String(feedback))) {
+    return res.status(500).json({ error: 'feedback contract not configured' });
+  }
+  if (!nft || zeroAddr.test(String(nft))) {
+    return res.status(500).json({ error: 'nft contract not configured' });
+  }
 
   try {
     // Verify signature
@@ -94,9 +100,13 @@ router.get('/group/root', async (_req, res) => {
   res.json({ root: null });
 });
 
-router.get('/epoch', (_req, res) => {
-  const epoch = Math.floor(Date.now() / 1000 / 3600);
-  res.json({ epoch });
+router.get('/epoch', async (_req, res) => {
+  const { epochLength } = getContractsJson();
+  const len = Number(epochLength || 3600);
+  const blk = await publicClient.getBlock({ blockTag: 'latest' });
+  const nowSec = Number(blk.timestamp);
+  const epoch = Math.floor(nowSec / len);
+  res.json({ epoch, epochLength: len, now: nowSec });
 });
 
 const PostBody = z.object({
@@ -107,6 +117,7 @@ const PostBody = z.object({
   merkleRoot: z.union([z.string(), z.number()]),
   nullifierHash: z.union([z.string(), z.number()]),
   feedback: z.union([z.string(), z.number()]),
+  scope: z.union([z.string(), z.number()]),
   content: z.string().min(1),
   boardId: z.string().default('default')
 });
@@ -117,14 +128,35 @@ router.post('/posts', async (req, res) => {
     return res.status(400).json({ error: parsed.error.flatten() });
   }
 
-  const { proof, merkleRoot, nullifierHash, feedback: feedbackValue, content, boardId } = parsed.data;
-  const { feedback } = getContractsJson();
+  const { proof, merkleRoot, nullifierHash, feedback: feedbackValue, scope, content, boardId } = parsed.data;
+  const { feedback, boardSalt, epochLength } = getContractsJson();
 
   if (!feedback) {
     return res.status(500).json({ error: 'feedback contract not configured' });
   }
 
   try {
+    // Optional: derive expected scopes for now/prev and validate
+    try {
+      const { keccak256, encodeAbiParameters } = await import('viem');
+      const len = Number(epochLength || 3600);
+      const blk = await publicClient.getBlock({ blockTag: 'latest' });
+      const nowSec = Number(blk.timestamp);
+      const ep = Math.floor(nowSec / len);
+      const scopeNow = BigInt(keccak256(encodeAbiParameters([
+        { name: 'boardSalt', type: 'bytes32' },
+        { name: 'epoch', type: 'uint64' }
+      ], [boardSalt as `0x${string}`, BigInt(ep)])));
+      const scopePrev = BigInt(keccak256(encodeAbiParameters([
+        { name: 'boardSalt', type: 'bytes32' },
+        { name: 'epoch', type: 'uint64' }
+      ], [boardSalt as `0x${string}`, BigInt(ep - 1)])));
+      const provided = BigInt(scope as any);
+      if (provided !== scopeNow && provided !== scopePrev) {
+        return res.status(400).json({ error: 'scope does not match current or previous epoch' });
+      }
+    } catch {}
+
     const walletClient = getWalletClient();
     const hash = await walletClient.writeContract({
       address: feedback as `0x${string}`,
@@ -135,6 +167,7 @@ router.post('/posts', async (req, res) => {
         BigInt(merkleRoot as any),
         BigInt(nullifierHash as any),
         BigInt(feedbackValue as any),
+        BigInt(scope as any),
         proof.points.map((value) => BigInt(value as any)) as [
           bigint,
           bigint,
@@ -181,7 +214,7 @@ router.post('/posts', async (req, res) => {
       id: receipt.transactionHash,
       boardId,
       pseudoId: String(nullifierHash),
-      scope: String(0),
+      scope: String(scope),
       merkleRoot: String(merkleRoot),
       signal: String(feedbackValue),
       content,

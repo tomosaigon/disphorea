@@ -1,101 +1,112 @@
-<h1 align="center">
-    Semaphore Boilerplate
-</h1>
+# Disphorea Monorepo (Semaphore + Express + NFT‑gated Groups)
 
-<p align="center">
-    <a href="https://github.com/semaphore-protocol" target="_blank">
-        <img src="https://img.shields.io/badge/project-Semaphore-blue.svg?style=flat-square">
-    </a>
-    <a href="https://github.com/semaphore-protocol/boilerplate/blob/main/LICENSE">
-        <img alt="Github license" src="https://img.shields.io/github/license/semaphore-protocol/boilerplate.svg?style=flat-square">
-    </a>
-    <a href="https://github.com/semaphore-protocol/boilerplate/actions?query=workflow%3Astyle">
-        <img alt="GitHub Workflow style" src="https://img.shields.io/github/actions/workflow/status/semaphore-protocol/boilerplate/style.yml?branch=main&label=style&style=flat-square&logo=github">
-    </a>
-    <a href="https://eslint.org/">
-        <img alt="Linter eslint" src="https://img.shields.io/badge/linter-eslint-8080f2?style=flat-square&logo=eslint">
-    </a>
-    <a href="https://prettier.io/">
-        <img alt="Code style prettier" src="https://img.shields.io/badge/code%20style-prettier-f8bc45?style=flat-square&logo=prettier">
-    </a>
-    <a href="https://www.gitpoap.io/gh/semaphore-protocol/boilerplate" target="_blank">
-        <img src="https://public-api.gitpoap.io/v1/repo/semaphore-protocol/boilerplate/badge">
-    </a>
-</p>
+Disphorea is a monorepo that combines:
 
-| The repository is divided into two components: [web app](./apps/web-app) and [contracts](./apps/contracts). The app allows users to create their own Semaphore identity, join a group and then send their feedback anonymously (currently on Sepolia). |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+- `apps/web-app`: Next.js front‑end (based on the Semaphore boilerplate)
+- `apps/contracts`: Hardhat workspace with Semaphore integration and a Basic ERC‑721 used for gating
+- `apps/server`: Express backend that relays transactions to a local Hardhat node, verifies signatures for NFT‑gated joins, stores posts in SQLite, and optionally fans out to Discord
 
-## 🛠 Install
+This repository started from the Semaphore boilerplate and extends it into a multi‑app setup with an API server, an NFT‑gated membership model, and end‑to‑end tests that exercise the full flow (client proof → server relay → on‑chain verification).
 
-Use this repository as a Github [template](https://github.com/semaphore-protocol/boilerplate/generate).
 
-Clone your repository:
+## Prerequisites
 
-```bash
-git clone https://github.com/<your-username>/<your-repo>.git
+- Node.js 20 LTS (recommended).
+- Yarn 4 (Corepack): `corepack enable`.
+
+
+## Layout
+
+```
+apps/
+  web-app/      # Next.js UI
+  contracts/    # Hardhat + Semaphore + BasicNFT + Feedback (epoch scoped)
+  server/       # Express API (relayer + Discord + SQLite)
 ```
 
-and install the dependencies:
 
-```bash
-cd <your-repo> && yarn
+## Env and artifacts
+
+- `apps/server/.env` (see `.env.example`):
+  - `RPC_URL=http://127.0.0.1:8545`
+  - `CHAIN_ID=1337`
+  - `RELAYER_PRIVATE_KEY=0x…` (Hardhat deployer key for owner‑only calls)
+  - Optional Discord envs
+
+- Proving artifacts:
+  - We use `@zk-kit/semaphore-artifacts`. To copy depth‑specific artifacts to the web app: `SNARK_DEPTH=20 yarn artifacts:copy`.
+
+
+## Run locally
+
+Run each in its own terminal:
+
+1) Hardhat chain + deploy
+
+```
+yarn dev:contracts
 ```
 
-## 📜 Usage
+Writes `apps/server/config/contracts.json` and `apps/web-app/public/contracts.json`.
 
-Copy the `.env.example` file as `.env`:
+2) Start the server
 
-```bash
-cp .env.example .env
+```
+yarn dev:server
 ```
 
-and add your environment variables or run the app in a local network.
+API routes:
+- `GET /healthz`
+- `GET /api/contracts.json`
+- `GET /api/epoch`
+- `POST /api/posts` (relay Semaphore proof, store post)
+- `GET /api/join/challenge` and `POST /api/join` (signature‑verified NFT‑gated join)
+- `GET /api/discord/status`, `POST /api/discord/test` (optional)
 
-### Local server
+3) Front‑end (optional)
 
-You can start your app locally with:
-
-```bash
-yarn dev
+```
+yarn dev:web-app
 ```
 
-### Deploy the contract
 
-1. Go to the `apps/contracts` directory and deploy your contract:
+## Tests (E2E)
 
-```bash
-yarn deploy --semaphore <semaphore-address> --network sepolia
+We replaced the default tests with end‑to‑end tests that interact with the running server and local chain. Keep the Hardhat node and the server running.
+
+Run (unit + integration):
+
+```
+yarn workspace contracts test
 ```
 
-2. Update the `apps/web-app/.env.production` file with your new contract address and the group id.
+Covered flows:
+- `apps/contracts/test/Feedback.ts`:
+  - Join NFT‑gated group for a test identity (on the server chain).
+  - Generate a Semaphore proof with epoch scope and relay via `POST /api/posts`.
+  - Validate nullifier reuse reverts; posting next epoch succeeds.
+- `apps/contracts/test/NFTJoin.ts`:
+  - Validate `joinGroup` (NFT holder) and `addMemberAdmin` (owner only).
+  - Server relayer join via `/api/join` with signature + on‑chain NFT ownership check.
 
-3. Copy your contract artifacts from `apps/contracts/artifacts/contracts` folder to `apps/web-app/contract-artifacts` folder.
+To include the server end‑to‑end tests, export `SERVER_E2E=true` (e.g. `SERVER_E2E=true yarn workspace contracts test`). Without this flag, the test suite skips the API relay scenarios and only runs the local contract checks.
 
-> [!NOTE]
-> Check the Semaphore contract addresses [here](https://docs.semaphore.pse.dev/deployed-contracts).
+Notes:
+- Epoch is derived from chain time (block.timestamp). Server and tests both use the external node’s time; tests use `evm_increaseTime` to hop epochs.
+- If you see “scope does not match current or previous epoch”, ensure the Hardhat node is running and the server is connected to the same RPC.
+- If relayer join reverts “Ownable”, ensure `RELAYER_PRIVATE_KEY` is the deployer (first Hardhat account).
+- After upgrading Node, run `yarn install` to rebuild native deps (e.g., better‑sqlite3).
 
-### Verify the contract
 
-Verify your contract on Etherscan:
+## Contract summary
 
-```bash
-yarn verify <your-contract-address> <semaphore-address> --network sepolia
-```
+Feedback (epoch‑scoped external nullifier):
+- `sendFeedback(uint256 merkleTreeDepth, uint256 merkleTreeRoot, uint256 nullifier, uint256 feedback, uint256 scope, uint256[8] points)`
+  - `scope` = `keccak256(abi.encode(boardSalt, epoch))`; contract accepts current or previous epoch.
+- `joinGroup(uint256 identityCommitment)` (NFT holder only)
+- `addMemberAdmin(uint256 identityCommitment)` (owner only)
 
-> **Note**  
-> Remember to set the Etherscan API Key in your .env file.
 
-### Code formatting
+## Credits
 
-Run [Prettier](https://prettier.io/) to check formatting rules:
-
-```bash
-yarn prettier
-```
-
-or to automatically format the code:
-
-```bash
-yarn prettier:write
-```
+Built on top of the Semaphore boilerplate, extended with an Express server, SQLite persistence, Discord bot, and end‑to‑end tests.

@@ -20,7 +20,16 @@ task("deploy", "Deploy BasicNFT and Feedback contract")
 
         const FeedbackFactory = await ethers.getContractFactory("Feedback")
 
-        const feedbackContract = await FeedbackFactory.deploy(semaphoreAddress, await nft.getAddress())
+        // Epoch configuration for tests (10s) and a deterministic board salt
+        const boardSalt = ethers.id("TEST-BOARD") // bytes32
+        const epochLen = 10 // seconds
+
+        const feedbackContract = await FeedbackFactory.deploy(
+            semaphoreAddress,
+            await nft.getAddress(),
+            boardSalt,
+            epochLen
+        )
 
         await feedbackContract.waitForDeployment()
 
@@ -32,20 +41,25 @@ task("deploy", "Deploy BasicNFT and Feedback contract")
             nft: await nft.getAddress(),
             feedback: await feedbackContract.getAddress(),
             groupId: Number(groupId),
-            boardSalt: "0x000000000000000000000000000000000000000000000000000000000000BEEF"
+            boardSalt,
+            epochLength: epochLen
         }
 
         if (logs) {
             console.info(`NFT deployed: ${addresses.nft}`)
             console.info(`Feedback deployed: ${addresses.feedback} (groupId: ${groupId})`)
             try {
-                const webDir = path.resolve(__dirname, "../../../web-app/public")
-                const serverDir = path.resolve(__dirname, "../../../server/config")
-                fs.mkdirSync(path.join(webDir), { recursive: true })
-                fs.mkdirSync(path.join(serverDir), { recursive: true })
-                fs.writeFileSync(path.join(webDir, "contracts.json"), JSON.stringify(addresses, null, 2))
-                fs.writeFileSync(path.join(serverDir, "contracts.json"), JSON.stringify(addresses, null, 2))
-                console.info(`Wrote contracts.json to web + server`)
+                // __dirname = apps/contracts/tasks
+                const webDir = path.resolve(__dirname, "../../web-app/public")
+                const serverDirApps = path.resolve(__dirname, "../../server/config")
+
+                fs.mkdirSync(webDir, { recursive: true })
+                fs.mkdirSync(serverDirApps, { recursive: true })
+
+                const json = JSON.stringify(addresses, null, 2)
+                fs.writeFileSync(path.join(webDir, "contracts.json"), json)
+                fs.writeFileSync(path.join(serverDirApps, "contracts.json"), json)
+                console.info(`Wrote contracts.json to web + apps/server`)        
             } catch (e) {
                 console.warn("Could not write contracts.json:", (e as Error).message)
             }
