@@ -109,10 +109,26 @@ describe("NFT-gated joining", () => {
     // Obtain canonical challenge from server
     const chRes = await fetch(`${SERVER_URL}/api/join/challenge?identityCommitment=${id.toString()}`);
     expect(chRes.ok, `challenge endpoint failed: ${chRes.status}`).to.eq(true);
-    const { message } = await chRes.json();
+    const challenge = await chRes.json() as {
+      domain: { name: string; version: string; chainId: number; verifyingContract: string };
+      types: Record<string, Array<{ name: string; type: string }>>;
+      message: { groupId: string; identityCommitment: string; nonce: string; expiresAt: string };
+    };
 
-    // Sign the challenge with the holder's wallet
-    const sig = await (a1 as any).signMessage(message);
+    // Sign the typed challenge with the holder's wallet
+    const typedDomain = {
+      name: challenge.domain.name,
+      version: challenge.domain.version,
+      chainId: Number(challenge.domain.chainId),
+      verifyingContract: challenge.domain.verifyingContract
+    };
+    const typedMessage = {
+      groupId: BigInt(challenge.message.groupId),
+      identityCommitment: BigInt(challenge.message.identityCommitment),
+      nonce: BigInt(challenge.message.nonce),
+      expiresAt: BigInt(challenge.message.expiresAt)
+    };
+    const sig = await (a1 as any).signTypedData(typedDomain, challenge.types as any, typedMessage);
 
     // Call relayer endpoint
     const joinRes = await fetch(`${SERVER_URL}/api/join`, {
@@ -120,8 +136,9 @@ describe("NFT-gated joining", () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         address: holderAddr,
-        identityCommitment: id.toString(),
-        message,
+        identityCommitment: challenge.message.identityCommitment,
+        nonce: challenge.message.nonce,
+        expiresAt: challenge.message.expiresAt,
         signature: sig
       })
     });

@@ -54,3 +54,5 @@ node_modules/
 !.yarn/releases
 !.yarn/sdks
 !.yarn/versions
+apps/server/data/app.db-wal
+apps/server/data/app.db-shm

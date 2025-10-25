@@ -2,8 +2,8 @@ import { Group, Identity, generateProof } from "@semaphore-protocol/core"
 import { getSnarkArtifacts } from "./helpers/snark"
 import { expect } from "chai"
 import { encodeBytes32String, keccak256, AbiCoder } from "ethers"
-import { ethers, run } from "hardhat"
 import type { EventLog } from "ethers"
+import { ethers, run } from "hardhat"
 // @ts-ignore: typechain folder will be generated after contracts compilation
 import { Feedback } from "../typechain-types"
 
@@ -128,15 +128,32 @@ describe("Feedback", () => {
             const holderAddr = await holder.getAddress()
             const challengeRes = await fetch(`${SERVER_URL}/api/join/challenge?identityCommitment=${serverIdentity.commitment.toString()}`)
             if (!challengeRes.ok) throw new Error(`challenge fetch failed: ${challengeRes.status}`)
-            const { message } = await challengeRes.json() as { message: string }
-            const signature = await holder.signMessage(message)
+            const challenge = await challengeRes.json() as {
+                domain: { name: string; version: string; chainId: number; verifyingContract: string };
+                types: Record<string, Array<{ name: string; type: string }>>;
+                message: { groupId: string; identityCommitment: string; nonce: string; expiresAt: string };
+            }
+            const typedDomain = {
+                name: challenge.domain.name,
+                version: challenge.domain.version,
+                chainId: Number(challenge.domain.chainId),
+                verifyingContract: challenge.domain.verifyingContract
+            }
+            const typedMessage = {
+                groupId: BigInt(challenge.message.groupId),
+                identityCommitment: BigInt(challenge.message.identityCommitment),
+                nonce: BigInt(challenge.message.nonce),
+                expiresAt: BigInt(challenge.message.expiresAt)
+            }
+            const signature = await holder.signTypedData(typedDomain, challenge.types as any, typedMessage)
             const joinRes = await fetch(`${SERVER_URL}/api/join`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     address: holderAddr,
-                    identityCommitment: serverIdentity.commitment.toString(),
-                    message,
+                    identityCommitment: challenge.message.identityCommitment,
+                    nonce: challenge.message.nonce,
+                    expiresAt: challenge.message.expiresAt,
                     signature
                 })
             })
@@ -144,7 +161,8 @@ describe("Feedback", () => {
             if (!joinRes.ok) {
                 throw new Error(`join failed: ${JSON.stringify(joinJson)}`)
             }
-            await provider.waitForTransaction(joinJson.txHash)
+            const receipt = await provider.waitForTransaction(joinJson.txHash, 1, 10_000)
+            expect(receipt && receipt.status === 1, 'relayer join tx failed').to.eq(true)
 
             const { epoch } = await fetchEpoch()
             const scopeHex = keccak256(AbiCoder.defaultAbiCoder().encode(["bytes32", "uint64"], [boardSalt, BigInt(epoch)]))

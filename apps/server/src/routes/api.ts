@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { randomBytes } from 'crypto';
 import { z } from 'zod';
 import db from '../db/client';
 import { publicClient, getWalletClient, feedbackAbi, erc721Abi } from '../lib/viem';
@@ -39,16 +40,35 @@ router.post('/discord/test', async (req, res) => {
 const JoinBody = z.object({
   address: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
   identityCommitment: z.string().or(z.number()),
-  message: z.string().min(1),
+  nonce: z.string().or(z.number()),
+  expiresAt: z.string().or(z.number()),
   signature: z.string().regex(/^0x[a-fA-F0-9]+$/)
 });
+
+type JoinChallenge = {
+  identityCommitment: bigint;
+  expiresAt: number;
+  groupId: bigint;
+};
+
+const CHALLENGE_TTL_SECONDS = 5 * 60; // 5 minutes
+const joinChallenges = new Map<string, JoinChallenge>();
+
+function pruneChallenges() {
+  const now = Math.floor(Date.now() / 1000);
+  for (const [nonce, entry] of joinChallenges) {
+    if (entry.expiresAt < now) {
+      joinChallenges.delete(nonce);
+    }
+  }
+}
 
 router.post('/join', async (req, res) => {
   const parsed = JoinBody.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-  const { address, identityCommitment, message, signature } = parsed.data;
-  const { feedback, nft } = getContractsJson();
+  const { address, identityCommitment, nonce, expiresAt, signature } = parsed.data;
+  const { feedback, nft, chainId, groupId } = getContractsJson();
   const zeroAddr = /^0x0{40}$/i;
   if (!feedback || zeroAddr.test(String(feedback))) {
     return res.status(500).json({ error: 'feedback contract not configured' });
@@ -57,10 +77,71 @@ router.post('/join', async (req, res) => {
     return res.status(500).json({ error: 'nft contract not configured' });
   }
 
+  pruneChallenges();
+
+  let nonceBigInt: bigint;
+  let expiresAtBigInt: bigint;
+  let identityBigInt: bigint;
+
   try {
-    // Verify signature
-    const { verifyMessage } = await import('viem');
-    const ok = await verifyMessage({ address: address as `0x${string}`, message, signature: signature as `0x${string}` });
+    nonceBigInt = BigInt(nonce as any);
+    expiresAtBigInt = BigInt(expiresAt as any);
+    identityBigInt = BigInt(identityCommitment as any);
+  } catch (err) {
+    return res.status(400).json({ error: 'invalid numeric payload' });
+  }
+
+  const stored = joinChallenges.get(nonceBigInt.toString());
+  if (!stored) {
+    return res.status(400).json({ error: 'challenge not found' });
+  }
+
+  joinChallenges.delete(nonceBigInt.toString());
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (stored.expiresAt < nowSec || expiresAtBigInt < BigInt(nowSec)) {
+    return res.status(400).json({ error: 'challenge expired' });
+  }
+
+  if (stored.identityCommitment !== identityBigInt) {
+    return res.status(400).json({ error: 'identity mismatch' });
+  }
+
+  if (stored.groupId !== BigInt(groupId || 0)) {
+    return res.status(400).json({ error: 'group mismatch' });
+  }
+
+  try {
+    const { verifyTypedData } = await import('viem');
+    const domain = {
+      name: 'Disphorea',
+      version: '1',
+      chainId: BigInt(chainId || 31337),
+      verifyingContract: feedback as `0x${string}`
+    };
+    const types = {
+      JoinRequest: [
+        { name: 'groupId', type: 'uint256' },
+        { name: 'identityCommitment', type: 'uint256' },
+        { name: 'nonce', type: 'uint256' },
+        { name: 'expiresAt', type: 'uint256' }
+      ]
+    } as const;
+    const message = {
+      groupId: BigInt(groupId || 0),
+      identityCommitment: identityBigInt,
+      nonce: nonceBigInt,
+      expiresAt: expiresAtBigInt
+    } as const;
+
+    const ok = await verifyTypedData({
+      address: address as `0x${string}`,
+      domain,
+      types,
+      primaryType: 'JoinRequest',
+      message,
+      signature: signature as `0x${string}`
+    });
     if (!ok) return res.status(401).json({ error: 'invalid signature' });
 
     // Check NFT ownership on-chain
@@ -78,7 +159,7 @@ router.post('/join', async (req, res) => {
       address: feedback as `0x${string}`,
       abi: feedbackAbi,
       functionName: 'addMemberAdmin',
-      args: [BigInt(identityCommitment as any)]
+      args: [identityBigInt]
     });
     const rc = await publicClient.waitForTransactionReceipt({ hash });
     res.json({ ok: true, txHash: rc.transactionHash });
@@ -90,10 +171,59 @@ router.post('/join', async (req, res) => {
 
 // Provide a canonical message for clients to sign for joining
 router.get('/join/challenge', (req, res) => {
-  const identityCommitment = (req.query.identityCommitment as string) || '';
-  const { groupId } = getContractsJson();
-  const message = `Disphorea: Join group ${groupId} with commitment ${identityCommitment}`;
-  res.json({ message });
+  const identityCommitmentParam = req.query.identityCommitment as string | undefined;
+  if (!identityCommitmentParam) {
+    return res.status(400).json({ error: 'identityCommitment required' });
+  }
+
+  let identityBigInt: bigint;
+  try {
+    identityBigInt = BigInt(identityCommitmentParam);
+  } catch (err) {
+    return res.status(400).json({ error: 'invalid identityCommitment' });
+  }
+
+  const { chainId, feedback, groupId } = getContractsJson();
+  if (!feedback) {
+    return res.status(500).json({ error: 'feedback contract not configured' });
+  }
+
+  pruneChallenges();
+
+  const nonceBytes = randomBytes(16);
+  const nonce = BigInt('0x' + nonceBytes.toString('hex'));
+  const expiresAt = Math.floor(Date.now() / 1000) + CHALLENGE_TTL_SECONDS;
+
+  joinChallenges.set(nonce.toString(), {
+    identityCommitment: identityBigInt,
+    expiresAt,
+    groupId: BigInt(groupId || 0)
+  });
+
+  const domain = {
+    name: 'Disphorea',
+    version: '1',
+    chainId: Number(chainId || 31337),
+    verifyingContract: feedback
+  };
+
+  const types = {
+    JoinRequest: [
+      { name: 'groupId', type: 'uint256' },
+      { name: 'identityCommitment', type: 'uint256' },
+      { name: 'nonce', type: 'uint256' },
+      { name: 'expiresAt', type: 'uint256' }
+    ]
+  };
+
+  const message = {
+    groupId: BigInt(groupId || 0).toString(),
+    identityCommitment: identityBigInt.toString(),
+    nonce: nonce.toString(),
+    expiresAt: BigInt(expiresAt).toString()
+  };
+
+  res.json({ domain, types, message });
 });
 
 router.get('/group/root', async (_req, res) => {
